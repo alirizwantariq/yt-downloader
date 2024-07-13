@@ -2,26 +2,22 @@ import os
 import logging
 from datetime import datetime
 import subprocess
+import re
 
 def setup_logger(title):
-    # Create logs directory if it doesn't exist
     if not os.path.exists("logs"):
         os.makedirs("logs")
     
-    # Generate log file name based on the current time and video title
     log_file = os.path.join("logs", f"{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}_{title}.log")
     
-    # Set up logger
     logger = logging.getLogger("YouTubeDownloader")
     logger.setLevel(logging.DEBUG)
     
-    # File handler
     fh = logging.FileHandler(log_file)
     fh.setLevel(logging.DEBUG)
     
-    # Stream handler for terminal output
     sh = logging.StreamHandler()
-    sh.setLevel(logging.DEBUG)
+    sh.setLevel(logging.INFO)
     
     formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     fh.setFormatter(formatter)
@@ -33,18 +29,21 @@ def setup_logger(title):
     
     return logger
 
+def run_command(command, logger):
+    try:
+        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+        return result.stdout
+    except subprocess.CalledProcessError as e:
+        logger.error(f"Command failed: {e.cmd}")
+        logger.error(f"Error output: {e.stderr}")
+        raise
+
 def get_video_info(url, logger):
     try:
-        # Fetch video formats available for the provided URL
         command = ['yt-dlp', '-F', url]
-        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        
-        if result.returncode != 0:
-            logger.error(f"Error fetching video info: {result.stderr}")
-            raise Exception(result.stderr)
-        
-        logger.info(f"Fetched video info:\n{result.stdout}")
-        return result.stdout
+        output = run_command(command, logger)
+        logger.info(f"Fetched video info:\n{output}")
+        return output
     except Exception as e:
         logger.error(f"Error extracting video streams: {str(e)}")
         raise
@@ -55,44 +54,77 @@ def download_video(url, format_code, logger):
         os.makedirs(download_dir)
     
     try:
-        # Download video with the specified format code
-        command = ['yt-dlp', '-f', format_code, '-o', f'{download_dir}/%(title)s.%(ext)s', url]
-        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        output_template = os.path.join(download_dir, '%(title)s.%(ext)s')
+        command = [
+            'yt-dlp',
+            '-f', format_code,
+            '-o', output_template,
+            '--merge-output-format', 'mp4',
+            '--postprocessor-args', '-c:v libx264 -c:a aac',
+            url
+        ]
+        output = run_command(command, logger)
         
-        if result.returncode != 0:
-            logger.error(f"Error downloading video: {result.stderr}")
-            raise Exception(result.stderr)
+        # Extract the filename from the output
+        match = re.search(r'\[download\] (.+) has already been downloaded', output)
+        if match:
+            filename = match.group(1)
+        else:
+            filename = "Unknown"
         
-        logger.info(f"Download completed:\n{result.stdout}")
+        logger.info(f"Download completed: {filename}")
+        print(f"Video downloaded successfully: {filename}")
     except Exception as e:
         logger.error(f"Error during download: {str(e)}")
         raise
 
+def get_best_formats(video_info):
+    video_formats = re.findall(r'(\d+)\s+mp4.*\s+(\d+x\d+)', video_info)
+    audio_formats = re.findall(r'(\d+)\s+audio only.*?(\d+k)', video_info)
+    
+    if not video_formats:
+        raise ValueError("No suitable video formats found.")
+    if not audio_formats:
+        raise ValueError("No suitable audio formats found.")
+    
+    best_video = max(video_formats, key=lambda x: int(x[1].split('x')[0]))
+    best_audio = max(audio_formats, key=lambda x: int(x[1][:-1]))
+    
+    return f"{best_video[0]}+{best_audio[0]}"
+
 def main():
-    # Get the YouTube video URL from the user
     url = input("Enter the YouTube video URL: ")
     logger = setup_logger("main")
 
     try:
         video_info = get_video_info(url, logger)
-        
-        # Display video format information
         print(video_info)
         
-        # Prompt the user to select a format code for downloading
-        selected_option = input("Select the format code to download (e.g., '18' for 360p video+audio, 'bestvideo+bestaudio' for the best quality with merged audio): ")
+        print("\nOptions:")
+        print("1. Best quality (auto-selected)")
+        print("2. Custom format code")
+        choice = input("Enter your choice (1 or 2): ")
         
-        # Log the user's selection
-        logger.info(f"User selected format code: {selected_option}")
-        
-        if selected_option.lower() == 'all':
-            # Download the best quality video with audio
-            download_video(url, 'bestvideo+bestaudio', logger)
+        if choice == '1':
+            try:
+                format_code = get_best_formats(video_info)
+                logger.info(f"Auto-selected best format: {format_code}")
+            except ValueError as e:
+                logger.error(f"Error in auto-selection: {str(e)}")
+                print(f"Error: {str(e)}")
+                print("Falling back to default format 'bestvideo+bestaudio'")
+                format_code = 'bestvideo+bestaudio'
+        elif choice == '2':
+            format_code = input("Enter the format code: ")
+            logger.info(f"User selected format code: {format_code}")
         else:
-            # Download video with the specified format code
-            download_video(url, selected_option, logger)
+            raise ValueError("Invalid choice. Please enter 1 or 2.")
+        
+        download_video(url, format_code, logger)
     except Exception as e:
         logger.error(f"An error occurred: {str(e)}")
+        print(f"An error occurred: {str(e)}")
+        print("Please check the log file for details.")
 
 if __name__ == "__main__":
     main()
